@@ -7,7 +7,8 @@ import { promises as fsp } from "fs";
 import { renderAndZip } from "./src/render.js";
 import { isUrlAllowed, requireApiKey } from "./src/security.js";
 
-const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 8080;
+console.log('ENV PORT=', process.env.PORT);
 const API_KEY = process.env.API_KEY || "";
 const ALLOWED_HOSTS = (process.env.ALLOWED_HOSTS || "")
   .split(",")
