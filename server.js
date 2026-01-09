@@ -15,6 +15,12 @@ const ALLOWED_HOSTS = (process.env.ALLOWED_HOSTS || "")
   .filter(Boolean);
 
 const app = express();
+
+
+// Railway (and similar) may probe "/" to determine readiness.
+app.get("/", (req, res) => res.status(200).send("ok"));
+app.head("/health", (req, res) => res.status(200).end());
+
 app.use(express.json({ limit: "2mb" }));
 
 // In-memory job store (ephemeral). Persist by downloading ZIP from WordPress.
@@ -123,6 +129,14 @@ app.get("/api/jobs/:id/download", requireApiKey(API_KEY), (req, res) => {
 });
 
 // IMPORTANT for Railway: listen on 0.0.0.0
+
+process.on("SIGTERM", () => {
+  console.log("[SIGTERM] Received. Closing server...");
+  // Let Railway drain connections
+  setTimeout(() => process.exit(0), 1000).unref();
+});
+
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Headless Site Cloner listening on 0.0.0.0:${PORT}`);
 });
