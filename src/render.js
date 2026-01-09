@@ -3,6 +3,7 @@ import path from "path";
 import { promises as fsp } from "fs";
 import archiver from "archiver";
 import puppeteer from "puppeteer";
+import { setTimeout as sleep } from "node:timers/promises";
 import { URL } from "url";
 
 const CT_EXT = new Map([
@@ -143,7 +144,7 @@ export async function renderAndZip({ jobId, url, workDir, options = {}, onProgre
     async function visit(targetUrl, outHtmlRel) {
       onProgress?.({ stage: "navigate", message: targetUrl });
       await page.goto(targetUrl, { waitUntil, timeout: maxWaitMs });
-      if (extraWaitMs > 0) await page.waitForTimeout(extraWaitMs);
+      if (extraWaitMs > 0) await sleep(extraWaitMs);
 
       let html = await page.content();
       html = rewriteHtml(html, (val, pageUrl) => urlToLocalPath(val, pageUrl), targetUrl);
