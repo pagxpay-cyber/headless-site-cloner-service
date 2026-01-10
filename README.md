@@ -4,8 +4,6 @@ Este repositório contém o **Headless Site Cloner Service**, um serviço Node.j
 
 A documentação abaixo descreve como instalar e publicar o serviço em um **servidor próprio** (VPS) rodando **Ubuntu 24.04 + CloudPanel**, usando **Docker** e **Reverse Proxy** no Nginx do CloudPanel.
 
-> ✅ **Observação:** Este README considera **domínio próprio** (ex.: `cloner.seudominio.com`) e **não subdomínio**.
-
 ---
 
 ## Sumário
