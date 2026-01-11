@@ -6,74 +6,53 @@ import puppeteer from "puppeteer";
 import { setTimeout as sleep } from "node:timers/promises";
 import { URL } from "url";
 
+// Mapeamento de extensões para garantir que arquivos sem extensão na URL sejam salvos corretamente
 const CT_EXT = new Map([
   ["text/css", ".css"],
   ["text/javascript", ".js"],
   ["application/javascript", ".js"],
-  ["application/json", ".json"],
   ["image/png", ".png"],
   ["image/jpeg", ".jpg"],
-  ["image/gif", ".gif"],
   ["image/webp", ".webp"],
   ["image/svg+xml", ".svg"],
-  ["font/woff", ".woff"],
-  ["font/woff2", ".woff2"],
-  ["application/font-woff2", ".woff2"],
+  ["font/woff2", ".woff2"]
 ]);
 
 function safePath(p) {
-  // avoid weird traversal
-  p = p.replace(/\0/g, "");
-  p = p.replace(/\.\.(\/|\\)/g, "");
-  return p;
+  return p.replace(/\0/g, "").replace(/\.\.(\/|\\)/g, "");
 }
 
 function urlToLocalPath(u, baseUrl) {
-  const url = new URL(u, baseUrl);
-  const pathname = url.pathname || "/";
-  let out = pathname;
-  if (out.endsWith("/")) out += "index.html";
-  out = out.replace(/^\//, "");
-  out = safePath(out);
-  return out;
+  try {
+    const url = new URL(u, baseUrl);
+    let out = url.pathname || "/";
+    if (out.endsWith("/")) out += "index.html";
+    return safePath(out.replace(/^\//, ""));
+  } catch (e) { return u; }
 }
 
-function guessExt(contentType, urlStr) {
-  if (!contentType) {
-    const m = urlStr.match(/\.([a-zA-Z0-9]{1,6})(\?|#|$)/);
-    if (m) return "." + m[1].toLowerCase();
-    return "";
-  }
-  const ct = contentType.split(";")[0].trim().toLowerCase();
-  return CT_EXT.get(ct) || "";
+// NOVO: Corrige links dentro de arquivos CSS (fontes e backgrounds)
+function rewriteCss(css, pageUrl) {
+  return css.replace(/url\(['"]?([^'")]*)['"]?\)/gi, (match, val) => {
+    if (!val || val.startsWith("data:") || val.startsWith("http")) return match;
+    const local = urlToLocalPath(val, pageUrl);
+    return `url("./${local}")`;
+  });
 }
 
-async function writeFileEnsuringDir(fullPath, buffer) {
-  await fsp.mkdir(path.dirname(fullPath), { recursive: true });
-  await fsp.writeFile(fullPath, buffer);
-}
-
-function rewriteHtml(html, mapFn, pageUrl) {
-  // basic rewrite for src/href attributes
+function rewriteHtml(html, pageUrl) {
   return html.replace(/\b(src|href)=["']([^"']+)["']/gi, (m, attr, val) => {
-    if (!val || val.startsWith("data:") || val.startsWith("mailto:") || val.startsWith("tel:") || val.startsWith("#")) return m;
-    try {
-      const local = mapFn(val, pageUrl);
-      return `${attr}="${local}"`;
-    } catch {
-      return m;
-    }
+    if (!val || val.startsWith("data:") || val.startsWith("#") || val.includes("mailto:")) return m;
+    return `${attr}="./${urlToLocalPath(val, pageUrl)}"`;
   });
 }
 
 async function zipDir(inputDir, zipPath) {
-  await new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     const output = fs.createWriteStream(zipPath);
     const archive = archiver("zip", { zlib: { level: 9 } });
-
-    output.on("close", resolve);
+    output.on("close", resolve); // Garante que o ZIP só termine após o fechamento do stream
     archive.on("error", reject);
-
     archive.pipe(output);
     archive.directory(inputDir, false);
     archive.finalize();
@@ -84,89 +63,63 @@ export async function renderAndZip({ jobId, url, workDir, options = {}, onProgre
   const outDir = path.join(workDir, "static");
   await fsp.mkdir(outDir, { recursive: true });
 
-  const routes = Array.isArray(options.routes) ? options.routes : [];
-  const waitUntil = options.waitUntil || "networkidle0";
-  const extraWaitMs = Number(options.extraWaitMs || 1500);
-  const maxWaitMs = Number(options.maxWaitMs || 45000);
-  const downloadExternal = !!options.downloadExternal;
-
-  const base = new URL(url);
-
   const browser = await puppeteer.launch({
     headless: "new",
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--no-zygote",
-      "--single-process",
-    ],
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
   });
 
   try {
     const page = await browser.newPage();
-
-    // track & save responses
     const saved = new Set();
+    const base = new URL(url);
 
     page.on("response", async (resp) => {
       try {
-        const respUrl = resp.url();
-        const u = new URL(respUrl);
-
-        if (!downloadExternal && u.host !== base.host) return;
+        const rUrl = resp.url();
+        const u = new URL(rUrl);
+        if (!options.downloadExternal && u.host !== base.host) return;
 
         const ct = resp.headers()["content-type"] || "";
-        const ext = guessExt(ct, respUrl);
+        if (ct.includes("text/html")) return;
 
-        // Skip HTML documents here (we'll save via page.content)
-        const ctMain = ct.split(";")[0].trim().toLowerCase();
-        if (ctMain === "text/html") return;
-
-        let rel = urlToLocalPath(respUrl, url);
-        // ensure extension for assets if missing
-        if (ext && !path.extname(rel)) rel += ext;
-
+        let rel = urlToLocalPath(rUrl, url);
         const out = path.join(outDir, rel);
-
         if (saved.has(out)) return;
         saved.add(out);
 
-        const buf = await resp.buffer();
-        await writeFileEnsuringDir(out, buf);
+        let buf = await resp.buffer();
+        if (ct.includes("text/css")) {
+            buf = Buffer.from(rewriteCss(buf.toString(), rUrl));
+        }
 
-        onProgress?.({ stage: "assets", message: respUrl, assetsSaved: saved.size });
-      } catch {
-        // ignore
-      }
+        await fsp.mkdir(path.dirname(out), { recursive: true });
+        await fsp.writeFile(out, buf);
+        onProgress?.({ stage: "assets", message: rel, assetsSaved: saved.size });
+      } catch (e) {}
     });
 
-    async function visit(targetUrl, outHtmlRel) {
-      onProgress?.({ stage: "navigate", message: targetUrl });
-      await page.goto(targetUrl, { waitUntil, timeout: maxWaitMs });
-      if (extraWaitMs > 0) await sleep(extraWaitMs);
-
+    async function visit(target, outRel) {
+      await page.goto(target, { 
+        waitUntil: options.waitUntil || "networkidle0", 
+        timeout: options.maxWaitMs || 45000 
+      });
+      if (options.extraWaitMs) await sleep(Number(options.extraWaitMs));
+      
       let html = await page.content();
-      html = rewriteHtml(html, (val, pageUrl) => urlToLocalPath(val, pageUrl), targetUrl);
-
-      const outHtml = path.join(outDir, outHtmlRel);
-      await writeFileEnsuringDir(outHtml, Buffer.from(html, "utf-8"));
+      html = rewriteHtml(html, target);
+      
+      const fullOut = path.join(outDir, outRel);
+      await fsp.mkdir(path.dirname(fullOut), { recursive: true });
+      await fsp.writeFile(fullOut, html);
     }
 
-    // root
     await visit(url, "index.html");
-
-    // extra routes
-    for (const r of routes) {
-      const route = String(r || "").trim();
-      if (!route) continue;
-      const target = new URL(route.replace(/^\//, "/"), base).toString();
-      const rel = safePath(route.replace(/^\//, "").replace(/\/$/, ""));
-      const outHtmlRel = rel ? path.join(rel, "index.html") : "index.html";
-      await visit(target, outHtmlRel);
+    for (const r of (options.routes || [])) {
+        if (r === "/") continue;
+        const t = new URL(r, base).toString();
+        await visit(t, path.join(r.replace(/^\//, ""), "index.html"));
     }
 
-    onProgress?.({ stage: "zip", message: "Zipping files", assetsSaved: saved.size });
     const zipPath = path.join(workDir, `site-clone-${jobId}.zip`);
     await zipDir(outDir, zipPath);
     return zipPath;
